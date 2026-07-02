@@ -278,11 +278,15 @@ def download_and_merge_pdfs(download_targets, output_pdf_filepath):
         print("[!] No attachments were successfully compiled.")
 
 
-def _write_markdown(course_title, course_url, metadata, resources_md, lessons, output_md_filepath):
+def _write_markdown(course_title, course_url, metadata, resources_md, lessons, output_md_filepath, course_code=""):
     professor_name, num_lessons, total_length, course_format, about_class_text = metadata
 
     lines = [
         f"# {course_title}",
+    ]
+    if course_code:
+        lines.append(f"**Course Code:** {course_code}")
+    lines.extend([
         "",
         f"**Source URL:** {course_url}",
         "",
@@ -302,7 +306,7 @@ def _write_markdown(course_title, course_url, metadata, resources_md, lessons, o
         about_class_text,
         "",
         "## Lesson Index",
-    ]
+    ])
 
     if lessons:
         for lesson in lessons:
@@ -349,10 +353,16 @@ def scrape_course(course_url, output_dir):
     soup = BeautifulSoup(response.content, 'html.parser')
     title_tag = soup.find('h1')
     course_title = _sanitize_filename(title_tag.get_text(strip=True) if title_tag else course_url.split('/')[-1].replace('-', ' ').title())
+    
+    # Extract course code from URL (e.g., "ot500" from the end of the URL)
+    course_code = course_url.rstrip('/').split('-')[-1].upper() if '-' in course_url.rstrip('/').split('/')[-1] else ""
 
-    clean_pdf_base = re.sub(r'[^a-zA-Z0-9]', '', course_title)
-    clean_pdf_name = f"{clean_pdf_base}Attachments.pdf"
-    output_md_filepath = os.path.join(output_dir, f"{course_title}_Notebook.md")
+    if course_code:
+        clean_pdf_name = f"{course_title}_{course_code}_Attachments.pdf"
+        output_md_filepath = os.path.join(output_dir, f"{course_title}_{course_code}_Notebook.md")
+    else:
+        clean_pdf_name = f"{course_title}_Attachments.pdf"
+        output_md_filepath = os.path.join(output_dir, f"{course_title}_Notebook.md")
     output_pdf_filepath = os.path.join(output_dir, clean_pdf_name)
 
     metadata = _extract_course_metadata(soup)
@@ -371,7 +381,7 @@ def scrape_course(course_url, output_dir):
     except (ValueError, TypeError):
         pass
 
-    _write_markdown(course_title, course_url, metadata, resource_header, lessons, output_md_filepath)
+    _write_markdown(course_title, course_url, metadata, resource_header, lessons, output_md_filepath, course_code)
     print(f"[✔] Notebook-ready Markdown saved: {output_md_filepath}")
 
     if download_targets:
@@ -383,7 +393,8 @@ if __name__ == '__main__':
     os.makedirs(output_directory, exist_ok=True)
 
     courses_to_run = [
-        "https://www.biblicaltraining.org/learn/institute/exploring-old-testament-ot500"
+        "https://www.biblicaltraining.org/learn/institute/exploring-old-testament-ot500",
+        "https://www.biblicaltraining.org/learn/institute/bs600-listen-to-the-land-biblical-geography"
     ]
 
     for url in courses_to_run:
