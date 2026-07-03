@@ -251,31 +251,98 @@ def _scrape_lesson_page(lesson_url, default_index):
     }
 
 
-def download_and_merge_pdfs(download_targets, output_pdf_filepath):
-    print(f"[->] Initializing PDF Compilation Engine for {len(download_targets)} assets...")
-    writer = PdfWriter()
-    _add_attachment_outline_page(writer, download_targets)
-    successful_appends = 0
+def download_and_process_attachments(download_targets, output_dir, course_title, course_code):
+    """Download and process attachments: convert certain formats to PDF, save others as-is"""
+    print(f"[->] Processing {len(download_targets)} attachment(s)...")
+    processed_files = []
+    skipped_files = []
+    
+    # Create prefix for file naming
+    file_prefix = f"{course_title}_{course_code}" if course_code else course_title
+    
+    # File types to convert to PDF
+    convert_to_pdf_types = {".docx", ".odt", ".pptx"}
 
     for target in download_targets:
-        name = target["name"]
+        display_name = target["name"]
         url = target["url"]
-        print(f"    [->] Downloading asset to memory: {name}...")
-        response = requests.get(url, headers=HEADERS, timeout=20)
-        if response.status_code == 200:
-            pdf_stream = io.BytesIO(response.content)
-            writer.append(pdf_stream, outline_item=name)
-            successful_appends += 1
-        else:
-            print(f"    [!] Skipping asset '{name}': Server returned HTTP status {response.status_code}")
+        
+        # Extract actual filename from URL (before query params)
+        url_path = url.split('?')[0]
+        actual_filename = url_path.split('/')[-1]
+        
+        # Get file extension from actual filename
+        file_ext = url_path.lower().split('.')[-1]
+        file_ext_with_dot = f".{file_ext}"
+        
+        # Use actual filename if available, otherwise use display name
+        filename_to_use = actual_filename if actual_filename and '.' in actual_filename else display_name
+        
+        print(f"    [->] Processing: {display_name}...")
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=20)
+            if response.status_code != 200:
+                skipped_files.append((display_name, f"HTTP {response.status_code}"))
+                print(f"    [!] Skipping: HTTP {response.status_code}")
+                continue
+            
+            # Convert certain file types to PDF
+            if file_ext_with_dot in convert_to_pdf_types:
+                try:
+                    import pypandoc
+                    # Save temp file first with proper extension
+                    temp_file = os.path.join(output_dir, f"_temp_{filename_to_use}")
+                    with open(temp_file, 'wb') as temp:
+                        temp.write(response.content)
+                    
+                    # Convert to PDF
+                    base_name = filename_to_use.rsplit('.', 1)[0]
+                    output_pdf_name = f"{file_prefix}_{base_name}.pdf"
+                    output_pdf_path = os.path.join(output_dir, output_pdf_name)
+                    pypandoc.convert_file(temp_file, 'pdf', outputfile=output_pdf_path)
+                    
+                    # Clean up temp file
+                    os.remove(temp_file)
+                    
+                    processed_files.append((display_name, f"Converted to PDF: {output_pdf_name}"))
+                    print(f"    [✔] Converted {file_ext.upper()} to PDF: {output_pdf_name}")
+                except ImportError:
+                    # pypandoc not installed, download as-is
+                    output_file_name = f"{file_prefix}_{filename_to_use}"
+                    output_file_path = os.path.join(output_dir, output_file_name)
+                    with open(output_file_path, 'wb') as f:
+                        f.write(response.content)
+                    processed_files.append((display_name, f"Downloaded (conversion unavailable): {output_file_name}"))
+                    print(f"    [✔] Downloaded {file_ext.upper()} (pypandoc not installed): {output_file_name}")
+                except Exception as e:
+                    # Conversion failed, download as-is
+                    output_file_name = f"{file_prefix}_{filename_to_use}"
+                    output_file_path = os.path.join(output_dir, output_file_name)
+                    with open(output_file_path, 'wb') as f:
+                        f.write(response.content)
+                    processed_files.append((display_name, f"Downloaded (conversion failed): {output_file_name}"))
+                    print(f"    [!] Conversion failed, downloaded as {file_ext.upper()}: {output_file_name}")
+            
+            # Save other file types as-is
+            else:
+                output_file_name = f"{file_prefix}_{filename_to_use}"
+                output_file_path = os.path.join(output_dir, output_file_name)
+                with open(output_file_path, 'wb') as f:
+                    f.write(response.content)
+                processed_files.append((display_name, f"Downloaded: {output_file_name}"))
+                print(f"    [✔] Downloaded: {output_file_name}")
+        
+        except Exception as e:
+            skipped_files.append((display_name, str(e)))
+            print(f"    [!] Error processing '{display_name}': {str(e)}")
+        
         time.sleep(1)
 
-    if successful_appends > 0:
-        with open(output_pdf_filepath, "wb") as f_out:
-            writer.write(f_out)
-        print(f"[✔] Merged PDF generated with interactive structural outlines: {os.path.basename(output_pdf_filepath)}")
-    else:
-        print("[!] No attachments were successfully compiled.")
+    # Summary
+    total_attempted = len(processed_files) + len(skipped_files)
+    print(f"[✔] Attachment processing complete: {len(processed_files)}/{total_attempted} successful")
+    if skipped_files:
+        print(f"    [!] {len(skipped_files)} file(s) skipped")
 
 
 def _write_markdown(course_title, course_url, metadata, resources_md, lessons, output_md_filepath, course_code=""):
@@ -345,47 +412,55 @@ def _write_markdown(course_title, course_url, metadata, resources_md, lessons, o
 
 def scrape_course(course_url, output_dir):
     print(f"\n[+] Starting Processing for: {course_url}")
-    response = requests.get(course_url, headers=HEADERS)
-    if response.status_code != 200:
-        print(f"[!] Failed to fetch course page (Status: {response.status_code})")
-        return
-
-    soup = BeautifulSoup(response.content, 'html.parser')
-    title_tag = soup.find('h1')
-    course_title = _sanitize_filename(title_tag.get_text(strip=True) if title_tag else course_url.split('/')[-1].replace('-', ' ').title())
-    
-    # Extract course code from URL (e.g., "ot500" from the end of the URL)
-    course_code = course_url.rstrip('/').split('-')[-1].upper() if '-' in course_url.rstrip('/').split('/')[-1] else ""
-
-    if course_code:
-        clean_pdf_name = f"{course_title}_{course_code}_Attachments.pdf"
-        output_md_filepath = os.path.join(output_dir, f"{course_title}_{course_code}_Notebook.md")
-    else:
-        clean_pdf_name = f"{course_title}_Attachments.pdf"
-        output_md_filepath = os.path.join(output_dir, f"{course_title}_Notebook.md")
-    output_pdf_filepath = os.path.join(output_dir, clean_pdf_name)
-
-    metadata = _extract_course_metadata(soup)
-    resource_header, download_targets = extract_course_resources_header(soup, clean_pdf_name)
-    lesson_urls = _discover_lesson_links(soup, course_url)
-
-    lessons = []
-    for index, lesson_url in enumerate(lesson_urls, start=1):
-        lesson_data = _scrape_lesson_page(lesson_url, index)
-        if lesson_data:
-            lessons.append(lesson_data)
-        time.sleep(1)
-
     try:
-        lessons.sort(key=lambda x: int(x['number']))
-    except (ValueError, TypeError):
-        pass
+        response = requests.get(course_url, headers=HEADERS)
+        if response.status_code != 200:
+            print(f"[!] Failed to fetch course page (Status: {response.status_code})")
+            return {"status": "failed", "url": course_url, "reason": f"HTTP {response.status_code}"}
 
-    _write_markdown(course_title, course_url, metadata, resource_header, lessons, output_md_filepath, course_code)
-    print(f"[✔] Notebook-ready Markdown saved: {output_md_filepath}")
+        soup = BeautifulSoup(response.content, 'html.parser')
+        title_tag = soup.find('h1')
+        course_title = _sanitize_filename(title_tag.get_text(strip=True) if title_tag else course_url.split('/')[-1].replace('-', ' ').title())
+        
+        # Extract course code from URL (e.g., "ot500" from the end of the URL)
+        course_code = course_url.rstrip('/').split('-')[-1].upper() if '-' in course_url.rstrip('/').split('/')[-1] else ""
 
-    if download_targets:
-        download_and_merge_pdfs(download_targets, output_pdf_filepath)
+        if course_code:
+            clean_pdf_name = f"{course_title}_{course_code}_Attachments.pdf"
+            output_md_filepath = os.path.join(output_dir, f"{course_title}_{course_code}_Notebook.md")
+        else:
+            clean_pdf_name = f"{course_title}_Attachments.pdf"
+            output_md_filepath = os.path.join(output_dir, f"{course_title}_Notebook.md")
+        output_pdf_filepath = os.path.join(output_dir, clean_pdf_name)
+
+        metadata = _extract_course_metadata(soup)
+        resource_header, download_targets = extract_course_resources_header(soup, clean_pdf_name)
+        lesson_urls = _discover_lesson_links(soup, course_url)
+
+        print(f"    [->] Found {len(lesson_urls)} lessons to process...")
+        lessons = []
+        for index, lesson_url in enumerate(lesson_urls, start=1):
+            lesson_data = _scrape_lesson_page(lesson_url, index)
+            if lesson_data:
+                lessons.append(lesson_data)
+            time.sleep(1)
+
+        try:
+            lessons.sort(key=lambda x: int(x['number']))
+        except (ValueError, TypeError):
+            pass
+
+        _write_markdown(course_title, course_url, metadata, resource_header, lessons, output_md_filepath, course_code)
+        print(f"    [✔] Notebook-ready Markdown saved: {output_md_filepath}")
+
+        if download_targets:
+            download_and_process_attachments(download_targets, output_dir, course_title, course_code)
+            
+        return {"status": "success", "url": course_url, "title": course_title, "lessons": len(lessons)}
+        
+    except Exception as e:
+        print(f"    [!] Error: {str(e)}")
+        return {"status": "failed", "url": course_url, "reason": str(e)}
 
 
 if __name__ == '__main__':
@@ -393,15 +468,61 @@ if __name__ == '__main__':
     os.makedirs(output_directory, exist_ok=True)
 
     courses_to_run = [
-        "https://www.biblicaltraining.org/learn/institute/exploring-old-testament-ot500",
-        "https://www.biblicaltraining.org/learn/institute/bs600-listen-to-the-land-biblical-geography"
+    "https://www.biblicaltraining.org/learn/institute/nt620-romans",
+    "https://www.biblicaltraining.org/learn/institute/nt575-new-testament-theology",
+    "https://www.biblicaltraining.org/learn/institute/nt630-pastoral-epistles"
+    # "https://www.biblicaltraining.org/learn/institute/nt630-pastoral-epistles",
+    # "https://www.biblicaltraining.org/learn/institute/nt666-revelation",
+    # "https://www.biblicaltraining.org/learn/institute/ot501-survey-of-the-old-testament",
+    # "https://www.biblicaltraining.org/learn/institute/ot560-proverbs",
+    # "https://www.biblicaltraining.org/learn/institute/ot561-psalms",
+    # "https://www.biblicaltraining.org/learn/institute/ot590-old-testament-theology",
+    # "https://www.biblicaltraining.org/learn/institute/ot608-deuteronomy",
+    # "https://www.biblicaltraining.org/learn/institute/ot624-the-book-of-job",
+    # "https://www.biblicaltraining.org/learn/institute/ot650-isaiah",
+    # "https://www.biblicaltraining.org/learn/institute/ot666-daniel",
+    # "https://www.biblicaltraining.org/learn/institute/philippians-nt624",
+    # "https://www.biblicaltraining.org/learn/institute/survey-acts-revelation-nt504",
+    # "https://www.biblicaltraining.org/learn/institute/survey-gospels-acts-nt511",
+    # "https://www.biblicaltraining.org/learn/institute/survey-of-biblical-theology-bt504",
+    # "https://www.biblicaltraining.org/learn/institute/survey-romans-through-revelation-nt512",
+    # "https://www.biblicaltraining.org/learn/institute/th503-systematic-theology-i",
+    # "https://www.biblicaltraining.org/learn/institute/th504-systematic-theology-ii",
+    # "https://www.biblicaltraining.org/learn/institute/wm601-world-mission-of-the-church",
+    # "https://www.biblicaltraining.org/learn/institute/wm602-theology-of-world-missions",
+    # "https://www.biblicaltraining.org/learn/institute/th732-prayer",
+    # "https://www.biblicaltraining.org/learn/institute/th610-theology-and-practice-of-evangelism",
+    # "https://www.biblicaltraining.org/learn/institute/th620-history-of-philosophy-and-christian-thought"
     ]
 
-    for url in courses_to_run:
-        try:
-            scrape_course(url, output_directory)
-            time.sleep(3)
-        except Exception as e:
-            print(f"[!] Critical Error handling course {url}: {str(e)}")
+    results = {"success": [], "failed": []}
+    
+    print("\n" + "=" * 70)
+    print("BIBLICAL TRAINING COURSE SCRAPER - MULTI-COURSE PROCESSOR")
+    print("=" * 70)
+    print(f"Processing {len(courses_to_run)} course(s)...\n")
 
-    print("\n[✔] Processing completed successfully.")
+    for url in courses_to_run:
+        result = scrape_course(url, output_directory)
+        if result["status"] == "success":
+            results["success"].append(result)
+        else:
+            results["failed"].append(result)
+        time.sleep(3)
+
+    # Print Summary
+    print("\n" + "=" * 70)
+    print("PROCESSING SUMMARY")
+    print("=" * 70)
+    
+    print(f"\n✔ Successful: {len(results['success'])}/{len(courses_to_run)}")
+    for course in results["success"]:
+        print(f"  • {course['title']} ({course['lessons']} lessons)")
+    
+    if results["failed"]:
+        print(f"\n✗ Failed: {len(results['failed'])}/{len(courses_to_run)}")
+        for course in results["failed"]:
+            print(f"  • {course['url']}")
+            print(f"    Reason: {course['reason']}")
+    
+    print("\n" + "=" * 70)

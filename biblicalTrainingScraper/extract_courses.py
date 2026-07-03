@@ -17,7 +17,9 @@ def extract_course_slugs(page_url):
         return []
 
     # Find all bt_router_slug patterns in the page
-    slugs = re.findall(r'"bt_router_slug":"([^"]+)"', response.text)
+    all_slugs = re.findall(r'"bt_router_slug":"([^"]+)"', response.text)
+    # Filter out node IDs (they're not actual courses)
+    slugs = [s for s in all_slugs if not s.startswith("node-")]
     return list(set(slugs))  # Remove duplicates
 
 
